@@ -122,6 +122,12 @@
         "description": "概率唤醒触发概率",
         "hint": "不在场状态下每条消息触发概率唤醒判断的概率，范围0-1。0.02表示2%。",
         "default": 0.02
+      },
+      "proactive_skip_secretary": {
+        "type": "bool",
+        "description": "概率唤醒跳过秘书判定",
+        "hint": "关闭后，概率唤醒命中时跳过秘书的兴趣判断，直接让主模型回复。默认开启（保留秘书判断）。",
+        "default": false
       }
     }
   },

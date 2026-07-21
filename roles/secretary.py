@@ -274,6 +274,16 @@ class Secretary:
                             self.angel_context.conversation_ledger.get_context_snapshot(chat_id)
                         )
                         if recent_dialogue:
+                            # 检查是否跳过秘书判定（proactive_skip_secretary=True 时直接由主模型回复）
+                            if self.config_manager.proactive_skip_secretary:
+                                logger.info(f"AngelHeart[{chat_id}]: 概率唤醒跳过秘书判定，直接由主模型生成回复")
+                                await self.angel_context.status_transition_manager.transition_to_status(
+                                    chat_id, AngelHeartStatus.PROPABILITY_TRIGGERED, "概率唤醒跳过秘书判定"
+                                )
+                                return SecretaryDecision(
+                                    should_reply=True, reply_strategy="概率唤醒", topic="概率唤醒",
+                                    entities=[], facts=[], keywords=[]
+                                )
                             decision = await self.llm_analyzer.analyze_proactive(
                                 recent_dialogue, historical_context, chat_id
                             )

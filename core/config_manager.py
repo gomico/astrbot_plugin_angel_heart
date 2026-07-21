@@ -108,6 +108,10 @@ class ConfigManager:
     def proactive_probability(self) -> float:
         return self._get_grouped("leave_reply", "proactive_probability", 0.02)
 
+    @property
+    def proactive_skip_secretary(self) -> bool:
+        return self._get_grouped("leave_reply", "proactive_skip_secretary", False)
+
     # ========== wake_interaction ==========
 
     @property
