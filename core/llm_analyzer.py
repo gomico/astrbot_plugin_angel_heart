@@ -362,6 +362,9 @@ class LLMAnalyzer:
         response_text = ""
         try:
             response_text = await self._call_ai_model(prompt, chat_id)
+            logger.info(
+                f"[AngelHeart][{chat_id}]: 概率唤醒AI完整输出 ----\n{response_text}\n----"
+            )
             return self._parse_response(response_text, alias)
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning(
