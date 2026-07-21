@@ -60,7 +60,6 @@ _MIGRATION_MAP = {
 }
 
 _DEPRECATED_FLAT_KEYS = {
-    "familiarity_timeout",
     "tool_decoration_enabled",
     "tool_decoration_cooldown",
     "tool_decorations",
@@ -68,7 +67,6 @@ _DEPRECATED_FLAT_KEYS = {
 
 _DEPRECATED_GROUPED_KEYS = {
     "leave_reply": {
-        "familiarity_timeout",
     },
     "tool_decoration": {
         "tool_decoration_enabled",

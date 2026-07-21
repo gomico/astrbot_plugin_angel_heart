@@ -96,6 +96,10 @@ class ConfigManager:
     def familiarity_cooldown_duration(self) -> int:
         return self._get_grouped("leave_reply", "familiarity_cooldown_duration", 1800)
 
+    @property
+    def familiarity_timeout(self) -> int:
+        return self._get_grouped("leave_reply", "familiarity_timeout", 600)
+
     # ========== wake_interaction ==========
 
     @property

@@ -104,6 +104,12 @@
         "description": "离场应答冷却时间（秒）",
         "hint": "离场应答状态结束后多久才能再次触发。",
         "default": 1800
+      },
+      "familiarity_timeout": {
+        "type": "int",
+        "description": "混脸熟超时时间（秒）",
+        "hint": "混脸熟状态下多长时间无活动自动降级为不在场。",
+        "default": 600
       }
     }
   },
