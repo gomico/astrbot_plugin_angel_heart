@@ -27,7 +27,8 @@ class PromptModuleLoader:
         module_names = [
             "identity.md", "behavior_rules.md", "decision_logic.md",
             "conversation_analysis.md", "strategy_generation.md",
-            "instruction_prompts.md", "reasoning_prompts.md"
+            "instruction_prompts.md", "reasoning_prompts.md",
+            "proactive_decision.md"
         ]
 
         for name in module_names:
@@ -71,6 +72,32 @@ class PromptModuleLoader:
         template = "\n\n---\n\n".join(valid_parts)
 
         logger.debug(f"组装提示词模板，使用 {output_module}，总长度: {len(template)}")
+        return template
+
+    def build_proactive_prompt_template(self, is_reasoning_model: bool = False) -> str:
+        """组装概率唤醒模式的提示词模板
+
+        仅包含身份定义 + 概率唤醒决策逻辑 + 输出格式，
+        跳过 behavior_rules.md（"只回应明确提及我的人"等限制）和原有 decision_logic.md。
+
+        Args:
+            is_reasoning_model: 是否使用推理模式（详细版本）
+
+        Returns:
+            str: 组装好的完整提示词模板
+        """
+        base_parts = [
+            self.base_modules.get("identity.md", ""),
+            self.base_modules.get("proactive_decision.md", ""),
+        ]
+
+        output_module = "instruction_prompts.md" if is_reasoning_model else "reasoning_prompts.md"
+        all_parts = base_parts + [self.base_modules.get(output_module, "")]
+
+        valid_parts = [part for part in all_parts if part.strip()]
+        template = "\n\n---\n\n".join(valid_parts)
+
+        logger.debug(f"组装概率唤醒提示词模板，使用 {output_module}，总长度: {len(template)}")
         return template
 
     def reload_modules(self):

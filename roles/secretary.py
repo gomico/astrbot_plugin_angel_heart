@@ -5,6 +5,7 @@ AngelHeart 插件 - 秘书角色 (Secretary)
 
 import asyncio
 import json
+import random
 from typing import Dict, List
 from enum import Enum
 
@@ -101,6 +102,8 @@ class Secretary:
             return await self._handle_familiarity_reply(event, chat_id)
         elif current_status == AngelHeartStatus.SUMMONED:
             return await self._handle_summoned_reply(event, chat_id)
+        elif current_status == AngelHeartStatus.PROPABILITY_TRIGGERED:
+            return await self._handle_propability_triggered_reply(event, chat_id)
         elif current_status == AngelHeartStatus.OBSERVATION:
             return await self._handle_observation_reply(event, chat_id)
         else:
@@ -175,6 +178,35 @@ class Secretary:
                 entities=[], facts=[], keywords=[]
             )
 
+    async def _handle_propability_triggered_reply(self, event: AstrMessageEvent, chat_id: str) -> SecretaryDecision:
+        """处理概率唤醒状态 - 使用专用prompt做兴趣判断"""
+        try:
+            logger.info(f"AngelHeart[{chat_id}]: 秘书处理概率唤醒状态")
+
+            # 获取上下文
+            historical_context, recent_dialogue, boundary_ts = (
+                self.angel_context.conversation_ledger.get_context_snapshot(chat_id)
+            )
+
+            if not recent_dialogue:
+                logger.info(f"AngelHeart[{chat_id}]: 无新消息需要分析。")
+                return SecretaryDecision(
+                    should_reply=False, reply_strategy="无新消息", topic="未知",
+                    entities=[], facts=[], keywords=[]
+                )
+
+            # 使用概率唤醒专用分析
+            decision = await self.llm_analyzer.analyze_proactive(recent_dialogue, historical_context, chat_id)
+
+            return decision
+
+        except Exception as e:
+            logger.error(f"AngelHeart[{chat_id}]: 秘书概率唤醒处理异常: {e}", exc_info=True)
+            return SecretaryDecision(
+                should_reply=False, reply_strategy="处理异常", topic="未知",
+                entities=[], facts=[], keywords=[]
+            )
+
     async def _handle_observation_reply(self, event: AstrMessageEvent, chat_id: str) -> SecretaryDecision:
         """处理观测中状态 - 智能判断"""
         try:
@@ -227,6 +259,36 @@ class Secretary:
                 elif new_status == AngelHeartStatus.SUMMONED:
                     return await self._handle_summoned_reply(event, chat_id)
             else:
+                # 没有触发硬规则，检查是否启用概率唤醒
+                if self.config_manager.enable_proactive_judgment:
+                    roll = random.random()
+                    is_hit = roll < self.config_manager.proactive_probability
+                    logger.info(
+                        f"AngelHeart[{chat_id}]: 概率唤醒 roll={roll:.4f}, "
+                        f"阈值={self.config_manager.proactive_probability:.4f}, "
+                        f"判定={'通过' if is_hit else '未通过'}"
+                    )
+                    if is_hit:
+                        # 获取上下文用于分析
+                        historical_context, recent_dialogue, boundary_ts = (
+                            self.angel_context.conversation_ledger.get_context_snapshot(chat_id)
+                        )
+                        if recent_dialogue:
+                            decision = await self.llm_analyzer.analyze_proactive(
+                                recent_dialogue, historical_context, chat_id
+                            )
+                            if decision and decision.should_reply:
+                                # 感兴趣！转换状态并回复
+                                await self.angel_context.status_transition_manager.transition_to_status(
+                                    chat_id, AngelHeartStatus.PROPABILITY_TRIGGERED, "概率唤醒命中且感兴趣"
+                                )
+                                logger.info(f"AngelHeart[{chat_id}]: 概率唤醒分析判定感兴趣，参与群聊")
+                                return decision
+                            else:
+                                logger.debug(f"AngelHeart[{chat_id}]: 概率唤醒分析判定不感兴趣，保持沉默")
+                        else:
+                            logger.debug(f"AngelHeart[{chat_id}]: 概率唤醒命中但无新消息可分析")
+
                 logger.debug(f"AngelHeart[{chat_id}]: 秘书判断无触发条件，保持不在场")
                 return SecretaryDecision(
                     should_reply=False, reply_strategy="不在场", topic="未知",

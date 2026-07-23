@@ -110,6 +110,18 @@
         "description": "混脸熟超时时间（秒）",
         "hint": "混脸熟状态下多长时间无活动自动降级为不在场。",
         "default": 600
+      },
+      "enable_proactive_judgment": {
+        "type": "bool",
+        "description": "概率唤醒模式开关",
+        "hint": "启用后，不在场状态下每条消息有概率触发秘书做兴趣判断，不再仅依赖硬规则。",
+        "default": false
+      },
+      "proactive_probability": {
+        "type": "float",
+        "description": "概率唤醒触发概率",
+        "hint": "不在场状态下每条消息触发概率唤醒判断的概率，范围0-1。0.02表示2%。",
+        "default": 0.02
       }
     }
   },

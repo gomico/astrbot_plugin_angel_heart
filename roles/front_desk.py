@@ -465,11 +465,11 @@ class FrontDesk:
             event.stop_event()
 
     async def _check_and_handle_timeout(self, chat_id: str, current_time: float):
-        """检查并处理观测中/混脸熟状态超时"""
+        """检查并处理观测中/混脸熟/概率唤醒状态超时"""
         try:
             # 检查当前状态
             current_status = self.context.get_chat_status(chat_id)
-            if current_status not in (AngelHeartStatus.OBSERVATION, AngelHeartStatus.GETTING_FAMILIAR):
+            if current_status not in (AngelHeartStatus.OBSERVATION, AngelHeartStatus.GETTING_FAMILIAR, AngelHeartStatus.PROPABILITY_TRIGGERED):
                 return
 
             # 获取状态开始时间
@@ -485,8 +485,10 @@ class FrontDesk:
             # 根据状态选择超时时间
             if current_status == AngelHeartStatus.OBSERVATION:
                 timeout = self.config_manager.observation_timeout
-            else:
+            elif current_status == AngelHeartStatus.GETTING_FAMILIAR:
                 timeout = self.config_manager.familiarity_timeout
+            else:
+                timeout = self.config_manager.observation_timeout
 
             # 检查是否超时
             if current_time - status_start_time >= timeout:

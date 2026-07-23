@@ -83,6 +83,7 @@ class LLMAnalyzer:
             # 使用 PromptModuleLoader 构建提示词模板
             is_reasoning_model = config_manager.is_reasoning_model if config_manager else False
             self.base_prompt_template = self.prompt_loader.build_prompt_template(is_reasoning_model)
+            self.proactive_prompt_template = self.prompt_loader.build_proactive_prompt_template(is_reasoning_model)
 
             if self.base_prompt_template:
                 self.is_ready = True
@@ -107,6 +108,7 @@ class LLMAnalyzer:
             self.prompt_loader.reload_modules()
             is_reasoning_model = new_config_manager.is_reasoning_model if new_config_manager else False
             self.base_prompt_template = self.prompt_loader.build_prompt_template(is_reasoning_model)
+            self.proactive_prompt_template = self.prompt_loader.build_proactive_prompt_template(is_reasoning_model)
 
             if self.base_prompt_template:
                 self.is_ready = True
@@ -285,6 +287,94 @@ class LLMAnalyzer:
             )
 
         # 如果发生任何错误，都返回一个默认的不参与决策
+        return SecretaryDecision(
+            should_reply=False, reply_strategy="分析失败", topic="未知",
+            entities=[], facts=[], keywords=[]
+        )
+
+    def _build_proactive_prompt(
+        self, historical_context: List[Dict], recent_dialogue: List[Dict]
+    ) -> str:
+        """使用概率唤醒专用提示词模板构建分析提示词"""
+        historical_body = self._format_conversation_history(historical_context)
+        recent_body = self._format_conversation_history(recent_dialogue)
+
+        historical_text = f"<已回应消息>\n{historical_body}\n</已回应消息>" if historical_body else " "
+        recent_text = f"<未回应消息>\n{recent_body}\n</未回应消息>" if recent_body else " "
+
+        if not historical_text and not recent_text:
+            logger.warning(
+                "AngelHeart分析器: 概率唤醒格式化的对话历史为空，将生成一个空的分析提示词。"
+            )
+
+        alias = self.config_manager.alias if self.config_manager else "AngelHeart"
+
+        base_prompt = self.proactive_prompt_template
+        base_prompt = base_prompt.replace("{historical_context}", historical_text)
+        base_prompt = base_prompt.replace("{recent_dialogue}", recent_text)
+        base_prompt = base_prompt.replace("{reply_strategy_guide}", self.strategy_guide)
+        base_prompt = base_prompt.replace("{alias}", alias)
+        base_prompt = base_prompt.replace(
+            "{ai_self_identity}",
+            self.config_manager.ai_self_identity if self.config_manager else "",
+        )
+
+        return base_prompt
+
+    async def analyze_proactive(
+        self, historical_context: List[Dict], recent_dialogue: List[Dict], chat_id: str
+    ) -> SecretaryDecision:
+        """概率唤醒模式：判断是否对当前话题感兴趣，做出结构化决策 (JSON)
+
+        使用去除了"只回应明确提及我的人"限制的专用 prompt，
+        让 LLM 基于人格兴趣判断是否值得主动参与。
+        """
+        alias = self.config_manager.alias if self.config_manager else "AngelHeart"
+
+        if not self.analyzer_model_name:
+            logger.debug("AngelHeart分析器: 分析模型未配置, 跳过概率唤醒分析。")
+            return SecretaryDecision(
+                should_reply=False, reply_strategy="未配置", topic="未知",
+                entities=[], facts=[], keywords=[]
+            )
+
+        if not self.is_ready:
+            logger.debug("AngelHeart分析器: 由于核心Prompt模板丢失，概率唤醒分析已禁用。")
+            return SecretaryDecision(
+                should_reply=False,
+                reply_strategy="分析器未就绪",
+                topic="未知",
+                entities=[], facts=[], keywords=[]
+            )
+
+        logger.debug("AngelHeart分析器: 准备调用轻量级AI进行概率唤醒分析...")
+        prompt = self._build_proactive_prompt(historical_context, recent_dialogue)
+
+        if not prompt:
+            logger.warning("AngelHeart分析器: 概率唤醒生成的提示词为空")
+            return SecretaryDecision(
+                should_reply=False,
+                reply_strategy="分析内容为空",
+                topic="未知",
+                entities=[], facts=[], keywords=[]
+            )
+
+        response_text = ""
+        try:
+            response_text = await self._call_ai_model(prompt, chat_id)
+            return self._parse_response(response_text, alias)
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning(
+                f"AngelHeart分析器: 概率唤醒AI返回的JSON格式或内容有误: {e}. 原始响应: {response_text[:200]}..."
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(
+                f"💥 AngelHeart分析器: 概率唤醒AI分析失败: {e}",
+                exc_info=True,
+            )
+
         return SecretaryDecision(
             should_reply=False, reply_strategy="分析失败", topic="未知",
             entities=[], facts=[], keywords=[]

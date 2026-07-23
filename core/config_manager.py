@@ -100,6 +100,14 @@ class ConfigManager:
     def familiarity_timeout(self) -> int:
         return self._get_grouped("leave_reply", "familiarity_timeout", 600)
 
+    @property
+    def enable_proactive_judgment(self) -> bool:
+        return self._get_grouped("leave_reply", "enable_proactive_judgment", False)
+
+    @property
+    def proactive_probability(self) -> float:
+        return self._get_grouped("leave_reply", "proactive_probability", 0.02)
+
     # ========== wake_interaction ==========
 
     @property

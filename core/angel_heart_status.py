@@ -14,12 +14,13 @@ except ImportError:
 
 
 class AngelHeartStatus(Enum):
-    """AngelHeart 4状态枚举"""
+    """AngelHeart 状态枚举"""
 
     NOT_PRESENT = "不在场"  # 初始状态，无消息缓存
     SUMMONED = "被呼唤"  # 检测到唤醒词或@消息
     GETTING_FAMILIAR = "混脸熟"  # 连续互动阶段，可直接回复
     OBSERVATION = "观测中"  # 观测中等待，1分钟自动降级
+    PROPABILITY_TRIGGERED = "概率唤醒"  # 概率筛选命中，主动关注
 
 
 class StatusChecker:
@@ -439,6 +440,12 @@ class StatusTransitionManager:
             elif new_status == AngelHeartStatus.GETTING_FAMILIAR:
                 # 混脸熟状态不启动单独计时器，通过消息刷新
                 logger.debug(f"AngelHeart[{chat_id}]: 混脸熟状态，不启动计时器")
+
+            elif new_status == AngelHeartStatus.PROPABILITY_TRIGGERED:
+                # 概率唤醒状态超时由前台同步检查处理，同观测中
+                logger.debug(
+                    f"AngelHeart[{chat_id}]: 概率唤醒状态，超时将前台同步检查处理"
+                )
 
         except Exception as e:
             logger.warning(f"AngelHeart[{chat_id}]: 启动新计时器失败: {e}")

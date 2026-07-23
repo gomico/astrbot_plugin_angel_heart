@@ -55,7 +55,7 @@ class FishingDirectReply:
                 strategy = "跟紧复读队形"
                 topic = "复读互动"
             else:  # dense_conversation
-                strategy = "发个表情混个脸熟"
+                strategy = "有新角度再插话，没有就不回"
                 topic = "密集讨论"
 
             # 2. 创建决策对象 - 按照RAG规范添加字段
