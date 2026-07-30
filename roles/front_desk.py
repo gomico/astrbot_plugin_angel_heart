@@ -21,6 +21,7 @@ except ImportError:
     logger = logging.getLogger(__name__)
 from astrbot.api.event import AstrMessageEvent
 from astrbot.core.message.components import At, File, Image, Plain, Reply
+from astrbot.core.message.message_event_result import MessageChain
 from typing import Any, List, Dict  # 导入类型提示
 
 # 导入公共工具函数和 ConversationLedger
@@ -699,6 +700,7 @@ class FrontDesk:
             # 启动耐心计时器
             await self.context.start_patience_timer(chat_id)
 
+            # 概率唤醒/秘书唤醒统一走管道：注入上下文后走管道
             # Messages will be marked as processed after prompt construction in rewrite_prompt_for_llm
 
             # 注入上下文
