@@ -31,5 +31,4 @@
 - 话题没有违反底线原则，且有话可说 → `should_reply` = true，`reply_strategy` 填写你的参与意图
 - 话题超出你的知识范围但值得参与 → `should_reply` = true，`reply_strategy` = "需要搜索"
 - 以上条件全部不满足 → `should_reply` = false
-- 附加指导：当你不确定时，倾向于参与（false positive 比 false negative 好）
 </最终裁决>
