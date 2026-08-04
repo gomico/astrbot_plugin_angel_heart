@@ -33,7 +33,7 @@ from .core.config_manager import ConfigManager
 from .core.config_migration import run_migration
 from .roles.front_desk import FrontDesk
 from .roles.secretary import Secretary
-from .core.utils import strip_markdown
+from .core.utils import strip_markdown, format_decision_xml
 from .core.utils.message_utils import serialize_message_chain
 from .core.angel_heart_context import AngelHeartContext
 
@@ -111,6 +111,11 @@ class AngelHeartPlugin(Star):
                 logger.debug(
                     f"AngelHeart[{chat_id}]: 读取到上下文 - 记录数: {len(chat_records)}, 决策: {secretary_decision.get('reply_strategy', '未知')}, 需搜索: {needs_search}"
                 )
+
+                # 群聊上下文接管未启用时，决策不会通过 rewrite_prompt_for_llm 注入主模型。
+                # 这里做轻量补偿：把秘书决策作为临时消息追加到 req.contexts，
+                # 让主模型知晓系统已判定参与，避免被动唤醒后自我否决产生沉默宣言。
+                self._inject_decision_if_needed(chat_id, req, secretary_decision)
             except json.JSONDecodeError as e:
                 logger.warning(
                     f"AngelHeart[{chat_id}]: 解析 angelheart_context JSON 失败: {e}"
@@ -119,6 +124,65 @@ class AngelHeartPlugin(Star):
                 logger.warning(
                     f"AngelHeart[{chat_id}]: 处理 angelheart_context 时发生意外错误: {e}"
                 )
+
+    def _inject_decision_if_needed(
+        self, chat_id: str, req: ProviderRequest, secretary_decision: dict
+    ) -> None:
+        """group_chat_enhancement=false 时，把秘书决策轻量注入主模型请求。
+
+        完整重写（rewrite_prompt_for_llm）被关闭时，主模型收不到 <系统决策>，
+        只会被唤醒却不知道系统已判定参与，容易自我否决并输出沉默宣言
+        （如「（保持沉默，不插话）」这类旁白被当成消息发出）。
+        此处不触碰 req.contexts 的已有内容，仅追加一条临时决策消息。
+        """
+        try:
+            if self.config_manager.group_chat_enhancement:
+                return  # 走完整重写路径，不需要此处补偿
+            if not isinstance(secretary_decision, dict):
+                return
+            if not secretary_decision.get("should_reply"):
+                return
+            strategy = secretary_decision.get("reply_strategy")
+            if not strategy or strategy == "继续观察":
+                return
+
+            decision_xml = self._format_decision_xml_from_dict(secretary_decision)
+            if not decision_xml:
+                return
+            contexts = getattr(req, "contexts", None)
+            if not isinstance(contexts, list):
+                return
+            contexts.append(
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": decision_xml}],
+                    "sender_id": "angelheart-secretary",
+                    "sender_name": "AngelHeart秘书",
+                    "timestamp": time.time(),
+                    "is_processed": True,
+                    "_no_save": True,
+                    "is_temporary_context": True,
+                    "chat_id": chat_id,
+                }
+            )
+            logger.info(
+                f"AngelHeart[{chat_id}]: 群聊上下文接管未启用，已轻量注入秘书决策到主模型请求"
+            )
+        except Exception as e:
+            logger.warning(f"AngelHeart[{chat_id}]: 轻量注入秘书决策失败: {e}")
+
+    @staticmethod
+    def _format_decision_xml_from_dict(secretary_decision: dict) -> str:
+        """从决策 dict 生成系统决策 XML（format_decision_xml 需要对象，这里做适配）。"""
+        from types import SimpleNamespace
+
+        return format_decision_xml(
+            SimpleNamespace(
+                topic=secretary_decision.get("topic", ""),
+                reply_target=secretary_decision.get("reply_target", ""),
+                reply_strategy=secretary_decision.get("reply_strategy", ""),
+            )
+        )
 
     @filter.on_llm_request(priority=50)  # 在决策注入之后，日志之前执行
     async def delegate_prompt_rewriting(
