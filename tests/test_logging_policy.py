@@ -10,7 +10,8 @@ import os
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-EXCLUDED_DIR_NAMES = {"tests", "test", "__pycache__", ".git", ".pai"}
+# .venv：仓库内本地虚拟环境（依赖源码不是插件运行时源码）
+EXCLUDED_DIR_NAMES = {"tests", "test", "__pycache__", ".git", ".pai", ".venv"}
 
 
 def _runtime_files():

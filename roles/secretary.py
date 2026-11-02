@@ -19,7 +19,7 @@ class Secretary:
     秘书角色 - 专注的分析与决策员
     """
 
-    def __init__(self, config_manager, context, angel_context):
+    def __init__(self, config_manager, context, angel_context, digest_store=None):
         """
         初始化秘书角色。
 
@@ -27,6 +27,7 @@ class Secretary:
             config_manager: 配置管理器实例。
             context: 插件上下文对象。
             angel_context: AngelHeart全局上下文实例。
+            digest_store: 判定人格摘要存储（analyzer_persona_mode=digest 时使用）。
         """
         self._config_manager = config_manager
         self.context = context
@@ -36,7 +37,7 @@ class Secretary:
         analyzer_model_name = self.config_manager.analyzer_model
         # 传递 context 对象，让 LLMAnalyzer 在需要时动态获取 provider
         self.llm_analyzer = LLMAnalyzer(
-            analyzer_model_name, context, self.config_manager
+            analyzer_model_name, context, self.config_manager, digest_store
         )
 
     async def handle_message_by_state(self, event: AstrMessageEvent) -> SecretaryDecision:

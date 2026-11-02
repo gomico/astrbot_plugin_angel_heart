@@ -6,6 +6,7 @@ import string
 from astrbot.api import logger
 from ..core.utils import JsonParser, format_message_for_llm
 from ..models.analysis_result import SecretaryDecision
+from .persona_digest import DigestStore
 from .prompt_module_loader import PromptModuleLoader
 
 
@@ -60,11 +61,16 @@ class LLMAnalyzer:
         analyzer_model_name: str,
         context,
         config_manager=None,
+        digest_store: DigestStore | None = None,
     ):
         self.analyzer_model_name = analyzer_model_name
         self.context = context  # 存储 context 对象，用于动态获取 provider
         self.config_manager = config_manager  # 存储 config_manager 对象，用于访问配置
         self.is_ready = False  # 默认认为分析器未就绪
+        # 判定人格摘要存储（analyzer_persona_mode=digest 时替代人格全文）
+        self.digest_store = digest_store
+        # 摘要缺失回落全文的 warning 去重：每张卡每次 reload 只提示一次
+        self._persona_fallback_warned: set[str] = set()
 
         # 初始化提示词模块加载器
         self.prompt_loader = PromptModuleLoader()
@@ -94,6 +100,8 @@ class LLMAnalyzer:
     def reload_config(self, new_config_manager):
         """重新加载配置"""
         self.config_manager = new_config_manager
+        # 新一轮 reload：允许每张卡各提示一次摘要缺失
+        self._persona_fallback_warned.clear()
 
         # 重新加载提示词文档
         try:
@@ -125,14 +133,18 @@ class LLMAnalyzer:
         """
         return self._parse_and_validate_decision(response_text, alias, chat_id)
 
-    async def _resolve_persona_prompt(self, chat_id: str) -> str:
-        """取当前会话生效的人格提示词，作为分析请求的系统提示词。
+    async def _resolve_persona_prompt(self, chat_id: str) -> tuple[str, str]:
+        """取当前会话生效的人格，返回 (人格 name, 人格正文)。
 
-        人格由 AstrBot 人格系统维护，插件不再自建身份配置。
+        人格由 AstrBot 人格系统维护，插件不再自建身份配置。解析链与 AstrBot
+        完全一致：session_service_config → 会话 persona_id → profile 的
+        agent_runner → 系统默认，全部交给 resolve_selected_persona。
+
+        返回的 name 用于按人格卡查判定摘要（AstrBot v3 的 persona_id 即 name）。
         """
         persona_manager = getattr(self.context, "persona_manager", None)
         if not persona_manager or not chat_id:
-            return ""
+            return "", ""
 
         try:
             conversation_persona_id = None
@@ -152,13 +164,52 @@ class LLMAnalyzer:
                 platform_name=platform_name,
             )
             if not persona:
-                return ""
-            return str(persona.get("prompt") or "").strip()
+                return "", ""
+            name = str(persona.get("name") or "").strip()
+            prompt = str(persona.get("prompt") or "").strip()
+            return name, prompt
         except Exception as e:
             logger.warning(
                 f"AngelHeart分析器: 获取会话人格失败，本次只使用插件提示词: {e}"
             )
-            return ""
+            return "", ""
+
+    async def resolve_persona(self, chat_id: str) -> tuple[str, str]:
+        """公开的人格解析入口：摘要生成与 WebUI 枚举复用同一条解析链。"""
+        return await self._resolve_persona_prompt(chat_id)
+
+    def _persona_mode(self) -> str:
+        """当前判定人格模式；配置缺失或异常时按 full（历史行为）处理。"""
+        if not self.config_manager:
+            return "full"
+        try:
+            return str(self.config_manager.analyzer_persona_mode)
+        except Exception:
+            return "full"
+
+    def _digest_system_prompt(self, persona_name: str, persona_prompt: str) -> str:
+        """digest 模式下的 system：有摘要用摘要，缺失时 fail-open 回落人格全文。
+
+        缺失只记一次 warning（每张卡每次 reload 一条），判定不能因为摘要没生成
+        而停摆或延迟。
+        """
+        digest = ""
+        if self.digest_store is not None and persona_name:
+            try:
+                digest = str(self.digest_store.get(persona_name) or "").strip()
+            except Exception as e:
+                logger.warning(f"AngelHeart分析器: 读取判定人格摘要失败: {e}")
+                digest = ""
+        if digest:
+            return digest
+
+        if persona_name and persona_name not in self._persona_fallback_warned:
+            self._persona_fallback_warned.add(persona_name)
+            logger.warning(
+                f"AngelHeart分析器: 人格「{persona_name}」的判定摘要缺失，"
+                "本次回落人格全文；重载插件会自动补生成。"
+            )
+        return persona_prompt
 
     async def _call_ai_model(
         self, prompt: str, rules_text: str, chat_id: str
@@ -183,7 +234,10 @@ class LLMAnalyzer:
             raise Exception("未找到分析模型提供商")
 
         # 系统提示词用会话人格，插件规则作为第一条用户提示词
-        persona_prompt = await self._resolve_persona_prompt(chat_id)
+        persona_name, persona_prompt = await self._resolve_persona_prompt(chat_id)
+        system_prompt = persona_prompt
+        if self._persona_mode() == "digest":
+            system_prompt = self._digest_system_prompt(persona_name, persona_prompt)
         contexts = [{"role": "user", "content": rules_text}] if rules_text else None
 
         # 重试机制：最多重试1次，间隔3秒
@@ -197,7 +251,7 @@ class LLMAnalyzer:
                 token = await provider.text_chat(
                     prompt=prompt,
                     contexts=contexts,
-                    system_prompt=persona_prompt or None,
+                    system_prompt=system_prompt or None,
                 )
                 response_text = token.completion_text.strip()
 

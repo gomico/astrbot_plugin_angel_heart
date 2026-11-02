@@ -27,6 +27,16 @@
 
 同一时刻只有一种生效。WebUI 全局配置页提供预设 / 自定义切换。
 
+## 判定人格摘要
+
+`analyzer_persona_mode=digest` 时，秘书判定的 system 不再塞人格全文，改用每张人格卡
+一份的判定摘要。摘要单独存 `analyzer_personas.json`（key 为人格 `name`），机制与生成
+时机见 [prompts.md](prompts.md)。
+
+设置页「判定人格摘要」分区：顶部只读展示当前模式与秘书模型，下拉框分「在用」（显示
+被 N 个会话使用，选中后列出群名）与「其他」两组，下方可编辑摘要并手工保存 / 清空。
+清空后重载插件（或保存配置触发的重载）会由后台任务补生成。
+
 ## 联系人监控
 
 插件页面「联系人监控」每 3 秒刷新：
@@ -52,3 +62,5 @@
 - 来源登记 / 状态仪表盘
 - 全局配置读写（与 `_conf_schema.json` 同源）
 - 系统提示词设置读写
+- 判定人格摘要：`GET /analyzer_personas`、`POST /analyzer_personas/save`、
+  `POST /analyzer_personas/reset`（摘要超 600 字符返回 400）

@@ -182,6 +182,65 @@
             </n-button>
           </div>
         </n-card>
+        <n-card title="判定人格摘要" class="persona-card" embedded>
+          <p class="group-desc">
+            秘书判定的 system 默认塞进完整人格；digest 模式只放下面这张按人格卡生成的判定摘要，省上下文。
+            当前模式：<b>{{ personaMode === 'digest' ? 'digest' : 'full' }}</b>
+            · 秘书模型：<b>{{ analyzerModel || '未配置' }}</b>
+            <span v-if="personaMode !== 'digest'">（mode=full 时摘要不生效）</span>
+          </p>
+          <n-select
+            v-model:value="selectedPersona"
+            :options="personaOptions"
+            filterable
+            clearable
+            placeholder="选择要查看/编辑的人格卡"
+            class="persona-select"
+          />
+          <div v-if="personaLoaded && !personaList.length" class="persona-empty">
+            还没有可用的人格卡（先在 AstrBot 人格系统里建人格，再重载插件）
+          </div>
+          <div v-if="selectedPersonaUsedBy.length" class="persona-usedby">
+            <span class="persona-usedby-label">使用中的会话：</span>
+            <span
+              v-for="item in selectedPersonaUsedBy"
+              :key="item.umo"
+              class="persona-usedby-item"
+              :title="item.umo"
+            >
+              {{ item.display_name || item.umo }}
+            </span>
+          </div>
+          <n-input
+            v-model:value="personaDigestDraft"
+            type="textarea"
+            :rows="6"
+            :disabled="!selectedPersona"
+            placeholder="未生成，重载插件后自动生成"
+          />
+          <div class="prompt-save">
+            <n-button
+              type="primary"
+              size="small"
+              :disabled="!selectedPersona || !personaDigestDirty || personaSaving"
+              :loading="personaSaving"
+              @click="savePersonaDigest"
+            >
+              <template #icon><Icon icon="lucide:save" /></template>
+              保存
+            </n-button>
+            <n-button
+              size="small"
+              :disabled="!selectedPersona || personaResetting"
+              :loading="personaResetting"
+              @click="resetPersonaDigest"
+            >
+              <template #icon><Icon icon="lucide:eraser" /></template>
+              清空
+            </n-button>
+            <span v-if="currentPersonaMeta" class="persona-meta">{{ currentPersonaMeta }}</span>
+          </div>
+        </n-card>
         <SchemaForm
           v-if="settingsLoaded"
           :schema="settingsSchema"
@@ -261,7 +320,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, inject, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, h, inject, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   NButton,
   NCard,
@@ -492,6 +551,166 @@ async function savePromptSettings() {
   }
 }
 
+// ---------- 判定人格摘要（插件自有存储，按人格卡落盘） ----------
+
+interface PersonaUsage {
+  umo: string
+  display_name: string
+}
+
+interface PersonaDigestItem {
+  name: string
+  digest: string
+  generated_at: string
+  model: string
+  source: string
+  used_by: PersonaUsage[]
+}
+
+const personaMode = ref<'full' | 'digest'>('full')
+const analyzerModel = ref('')
+const personaList = ref<PersonaDigestItem[]>([])
+const personaLoaded = ref(false)
+const selectedPersona = ref<string | null>(null)
+const personaDigestDraft = ref('')
+const personaBaseline = ref('')
+const personaSaving = ref(false)
+const personaResetting = ref(false)
+
+const personaDigestDirty = computed(
+  () => personaDigestDraft.value !== personaBaseline.value,
+)
+
+const selectedPersonaItem = computed(
+  () => personaList.value.find((p) => p.name === selectedPersona.value) ?? null,
+)
+const selectedPersonaUsedBy = computed(() => selectedPersonaItem.value?.used_by ?? [])
+const currentPersonaMeta = computed(() => {
+  const item = selectedPersonaItem.value
+  if (!item) return ''
+  if (!item.digest) return '未生成'
+  const parts: string[] = []
+  if (item.source === 'manual') parts.push('手工填写')
+  else if (item.source === 'auto') parts.push('自动生成')
+  if (item.model) parts.push(`模型 ${item.model}`)
+  if (item.generated_at) parts.push(item.generated_at.replace('T', ' ').slice(0, 19))
+  return parts.join(' · ')
+})
+
+// 两个 optgroup：「在用」按会话数展示，「其他」是未被任何会话解析到的卡
+const personaOptions = computed(() => {
+  const inUse = personaList.value.filter((p) => p.used_by.length)
+  const others = personaList.value.filter((p) => !p.used_by.length)
+  const groups: Array<{
+    type: 'group'
+    label: string
+    key: string
+    children: Array<{ label: string; value: string }>
+  }> = []
+  if (inUse.length) {
+    groups.push({
+      type: 'group',
+      label: '在用',
+      key: 'in-use',
+      children: inUse.map((p) => ({
+        label: `${p.name}（${p.used_by.length} 个会话）`,
+        value: p.name,
+      })),
+    })
+  }
+  if (others.length) {
+    groups.push({
+      type: 'group',
+      label: '其他',
+      key: 'others',
+      children: others.map((p) => ({ label: p.name, value: p.name })),
+    })
+  }
+  return groups
+})
+
+function syncPersonaDraft(name: string | null) {
+  const item = personaList.value.find((p) => p.name === name)
+  personaDigestDraft.value = item?.digest ?? ''
+  personaBaseline.value = personaDigestDraft.value
+}
+
+function loadPersonaDigests() {
+  if (personaLoaded.value) return
+  void (async () => {
+    try {
+      const data = await apiGet<{
+        mode: string
+        analyzer_model: string
+        personas: PersonaDigestItem[]
+      }>('analyzer_personas')
+      personaMode.value = data?.mode === 'digest' ? 'digest' : 'full'
+      analyzerModel.value = String(data?.analyzer_model ?? '')
+      personaList.value = data?.personas || []
+      personaLoaded.value = true
+      if (!selectedPersona.value && personaList.value.length) {
+        selectedPersona.value = personaList.value[0].name
+      }
+      syncPersonaDraft(selectedPersona.value)
+    } catch (e) {
+      message.error(`加载判定人格摘要失败: ${(e as Error).message}`)
+    }
+  })()
+}
+
+async function savePersonaDigest() {
+  if (!selectedPersona.value) return
+  personaSaving.value = true
+  try {
+    const entry = await apiPost<{
+      digest: string
+      generated_at: string
+      model: string
+      source: string
+    }>('analyzer_personas/save', {
+      name: selectedPersona.value,
+      digest: personaDigestDraft.value,
+    })
+    const item = selectedPersonaItem.value
+    if (item && entry) {
+      item.digest = String(entry.digest ?? '')
+      item.generated_at = String(entry.generated_at ?? '')
+      item.model = String(entry.model ?? '')
+      item.source = String(entry.source ?? 'manual')
+    }
+    personaDigestDraft.value = item?.digest ?? personaDigestDraft.value
+    personaBaseline.value = personaDigestDraft.value
+    message.success('摘要已保存')
+  } catch (e) {
+    message.error(`保存失败: ${(e as Error).message}`)
+  } finally {
+    personaSaving.value = false
+  }
+}
+
+async function resetPersonaDigest() {
+  if (!selectedPersona.value) return
+  personaResetting.value = true
+  try {
+    await apiPost('analyzer_personas/reset', { name: selectedPersona.value })
+    const item = selectedPersonaItem.value
+    if (item) {
+      item.digest = ''
+      item.generated_at = ''
+      item.source = ''
+    }
+    personaDigestDraft.value = ''
+    personaBaseline.value = ''
+    message.success('已清空，重载插件后会重新生成')
+  } catch (e) {
+    message.error(`清空失败: ${(e as Error).message}`)
+  } finally {
+    personaResetting.value = false
+  }
+}
+
+watch(selectedPersona, (name) => syncPersonaDraft(name))
+
 // 全局配置可编辑：首次切到全局配置视图时加载 schema + 当前值
 function loadPluginConfig() {
   if (settingsLoaded.value) return
@@ -554,6 +773,7 @@ function selectTemplate(id: string | null) {
     // 全局配置视图：懒加载可编辑数据源
     loadPluginConfig()
     loadPromptSettings()
+    loadPersonaDigests()
     return
   }
   const tpl = templates.value.find((t) => t.id === id)
@@ -753,6 +973,7 @@ async function loadAll() {
 onMounted(async () => {
   loadPluginConfig()
   loadPromptSettings()
+  loadPersonaDigests()
   await loadAll()
   await refreshStatus()
   statusTimer = setInterval(refreshStatus, 3000)
@@ -886,6 +1107,52 @@ onUnmounted(() => {
   margin-bottom: 12px;
 }
 
+/* 判定人格摘要：与系统提示词卡同风格 */
+.persona-card {
+  margin-bottom: 12px;
+}
+
+.persona-select {
+  margin-bottom: 10px;
+}
+
+.persona-empty {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-bottom: 10px;
+}
+
+.persona-usedby {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  margin-bottom: 10px;
+}
+
+.persona-usedby-label {
+  color: var(--text-3);
+}
+
+.persona-usedby-item {
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--glass-divider);
+  color: var(--text-2);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.persona-meta {
+  font-size: 12px;
+  color: var(--text-3);
+  align-self: center;
+}
+
 .group-desc {
   font-size: 12px;
   color: var(--text-3);
@@ -914,7 +1181,9 @@ onUnmounted(() => {
 
 .prompt-save {
   display: flex;
+  align-items: center;
   justify-content: flex-start;
+  gap: 8px;
   margin-top: 12px;
 }
 

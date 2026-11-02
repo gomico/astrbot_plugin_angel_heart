@@ -90,6 +90,15 @@ class ConfigManager:
     def is_reasoning_model(self) -> bool:
         return self._config.get("is_reasoning_model", False)
 
+    @property
+    def analyzer_persona_mode(self) -> str:
+        """秘书判定的 system 人格来源：full（人格全文）或 digest（判定摘要）。
+
+        非法值回落 full，保证与历史行为一致。
+        """
+        raw = str(self._config.get("analyzer_persona_mode", "") or "").strip().lower()
+        return "digest" if raw == "digest" else "full"
+
     # ========== timing ==========
 
     @property

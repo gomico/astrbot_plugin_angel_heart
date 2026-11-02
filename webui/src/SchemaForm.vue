@@ -37,6 +37,13 @@
               class="control-select"
               @update:value="(v: unknown) => setIn(row.path, v ?? '')"
             />
+            <n-select
+              v-else-if="optionSelectOptions(row.meta).length"
+              :value="asString(getIn(row.path))"
+              :options="optionSelectOptions(row.meta)"
+              class="control-select"
+              @update:value="(v: unknown) => setIn(row.path, v ?? '')"
+            />
             <n-dynamic-input
               v-else-if="isKvMap(row.meta, row.path)"
               :value="kvRowsOf(row.path)"
@@ -343,6 +350,15 @@ function isProviderSelect(meta: SchemaMeta, path: string[]): boolean {
   const p = props.providers || {}
   const ids = /embed/i.test(key) ? p.embedding : /rerank/i.test(key) ? p.rerank : p.chat
   return !!ids?.length
+}
+
+// 固定枚举字段：schema.options 是字符串数组时渲染下拉，避免手打死值
+function optionSelectOptions(meta: SchemaMeta) {
+  const raw = meta.options
+  if (!Array.isArray(raw) || !raw.length) return []
+  return raw
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => ({ label: item, value: item }))
 }
 
 function providerOptions(path: string[]) {

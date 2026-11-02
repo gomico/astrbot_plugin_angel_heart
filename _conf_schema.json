@@ -19,6 +19,16 @@
     "hint": "默认开启。如果是带思维链的模型，请不要关闭。关闭后会要求模型先输出分析过程，再输出 JSON。",
     "default": true
   },
+  "analyzer_persona_mode": {
+    "type": "string",
+    "description": "判定人格摘要",
+    "hint": "full 把完整人格塞进秘书判定的 system 提示词；digest 只放每张人格卡自动生成的判定摘要，省上下文；摘要在设置页可编辑。",
+    "default": "full",
+    "options": [
+      "full",
+      "digest"
+    ]
+  },
 
   "timing": {
     "type": "object",

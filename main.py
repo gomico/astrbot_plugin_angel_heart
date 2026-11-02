@@ -8,6 +8,7 @@ AngelHeart插件 - 天使心智能群聊/私聊交互插件
 - 私聊：只缓存，主框架队列（无法向运行中子代理注入消息）
 """
 
+import asyncio
 import time
 import json
 import os
@@ -26,6 +27,7 @@ from astrbot.core.message.components import Plain, At, AtAll, Reply, Poke, Image
 
 from .core.config_manager import ConfigManager
 from .core.config_migration import run_migration
+from .core.persona_digest import DigestStore, collect_service_umos, ensure_all
 from .core.quote_target import (
     classify_missing_target,
     count_gap_messages,
@@ -98,6 +100,12 @@ class AngelHeartPlugin(Star):
         self.prompt_settings = PromptSettingsStore(plugin_data_dir)
         self.config_manager.attach_prompt_settings(self.prompt_settings)
 
+        # -- 判定人格摘要（digest 模式下替代秘书判定 system 里的人格全文）--
+        self.persona_digests = DigestStore(plugin_data_dir)
+        # 后台补生成任务：同一时刻只跑一个，期间再有触发就排队一次
+        self._persona_digest_task: asyncio.Task | None = None
+        self._persona_digest_pending = False
+
         # -- 创建 AngelHeartContext 全局上下文（包含 ConversationLedger）--
         self.angel_context = AngelHeartContext(self.config_manager, self.context, plugin_data_dir)
         self.context.add_llm_tools(
@@ -111,7 +119,7 @@ class AngelHeartPlugin(Star):
         # -- 角色实例 --
         # 创建秘书和前台，通过全局上下文传递依赖
         self.secretary = Secretary(
-            self.config_manager, self.context, self.angel_context
+            self.config_manager, self.context, self.angel_context, self.persona_digests
         )
         self.front_desk = FrontDesk(self.config_manager, self.angel_context)
         self.front_desk.chat_sources = self.chat_sources
@@ -138,12 +146,91 @@ class AngelHeartPlugin(Star):
                 config=self.config,
                 plugin=self,
                 prompt_settings=self.prompt_settings,
+                persona_digest_store=self.persona_digests,
+                persona_resolver=self.secretary.llm_analyzer.resolve_persona,
             )
             logger.info("AngelHeart: 已注册群聊配置 WebUI API 路由")
         except Exception as e:  # pragma: no cover - 兼容旧版 AstrBot
             logger.warning(f"AngelHeart: WebUI API 路由注册失败（不影响核心功能）: {e}")
 
+        # 初始化（含 reload）后后台补生成缺失的判定人格摘要；不阻塞插件加载
+        self._schedule_persona_digest_ensure("插件初始化")
+
         logger.info("💖 AngelHeart智能回复员初始化完成 (事件扣押机制 V2 已启用)")
+
+    # --- 判定人格摘要后台补生成 ---
+
+    def _schedule_persona_digest_ensure(self, reason: str = "") -> None:
+        """安排一次后台补生成；已有任务在跑时只排一次等待。
+
+        用独立的 asyncio 任务执行，绝不阻塞插件加载或秘书判定。
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug(
+                f"AngelHeart: 当前没有运行中的事件循环，跳过判定人格摘要补生成（{reason}）"
+            )
+            return
+        if self._persona_digest_task is not None and not self._persona_digest_task.done():
+            # 同一时刻只保留一个生成任务，收尾后再补跑一轮
+            self._persona_digest_pending = True
+            logger.debug(
+                f"AngelHeart: 判定人格摘要生成仍在进行，排到本轮之后（{reason}）"
+            )
+            return
+        umos = collect_service_umos(
+            self.config_manager, self.profile_store, self.chat_sources
+        )
+        if not umos:
+            logger.debug(
+                f"AngelHeart: 没有可枚举的服务会话，跳过判定人格摘要补生成（{reason}）"
+            )
+            return
+        self._persona_digest_pending = False
+        self._persona_digest_task = asyncio.create_task(
+            self._run_persona_digest_ensure(umos, reason)
+        )
+
+    async def _run_persona_digest_ensure(self, umos: list[str], reason: str) -> None:
+        """后台任务外壳：异常只记日志，收尾时处理排队中的下一次触发。"""
+        logger.debug(
+            f"AngelHeart: 开始补生成判定人格摘要（{reason}），服务会话 {len(umos)} 个"
+        )
+        try:
+            await ensure_all(
+                self.config_manager,
+                self.context.get_provider_by_id,
+                self.secretary.llm_analyzer.resolve_persona,
+                umos,
+                self.persona_digests,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                f"AngelHeart: 判定人格摘要后台补生成失败（不影响判定）: {e}"
+            )
+        finally:
+            self._persona_digest_task = None
+            if self._persona_digest_pending:
+                self._persona_digest_pending = False
+                self._schedule_persona_digest_ensure("排队补跑")
+
+    async def _cancel_persona_digest_task(self) -> None:
+        """停用时取消仍在跑的补生成任务。"""
+        task = self._persona_digest_task
+        self._persona_digest_task = None
+        self._persona_digest_pending = False
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"AngelHeart: 取消判定人格摘要任务时出现异常: {e}")
 
     # --- 核心事件处理 ---
     @filter.event_message_type(
@@ -315,6 +402,8 @@ class AngelHeartPlugin(Star):
         # 保存后重新检查引用冲突（开关状态可能刚变化）
         self._quote_conflict_warned.clear()
         self._check_quote_target_conflict("")
+        # 用户可能在设置页清空过摘要：配置保存即触发补生成
+        self._schedule_persona_digest_ensure("配置保存")
         logger.info(
             f"AngelHeart: 配置已保存并即时生效。助理休息: {self.config_manager.waiting_time}秒"
         )
@@ -337,6 +426,9 @@ class AngelHeartPlugin(Star):
         # 配置重载后按默认宿主配置重新检查引用冲突（允许再次提示）
         self._quote_conflict_warned.clear()
         self._check_quote_target_conflict("")
+
+        # 重载插件后补生成缺失的判定人格摘要（清空摘要即靠这条路径恢复）
+        self._schedule_persona_digest_ensure("配置重载")
 
         logger.info(
             f"AngelHeart: 配置已更新。助理休息: {self.config_manager.waiting_time}秒，"
@@ -1160,7 +1252,12 @@ class AngelHeartPlugin(Star):
     async def _cleanup_all_waiting_resources(self):
         """清理插件创建的全部后台任务、运行态内存与持久连接。"""
         try:
-            # 先取消私聊摘要，确保整理锁释放且不再访问即将关闭的 ledger。
+            # 先取消摘要补生成，避免在清理过程中继续占用秘书模型
+            await self._cancel_persona_digest_task()
+        except Exception as e:
+            logger.error(f"AngelHeart: 取消判定人格摘要任务失败: {e}", exc_info=True)
+        try:
+            # 再取消私聊摘要，确保整理锁释放且不再访问即将关闭的 ledger。
             await self.front_desk.cleanup_background_tasks()
         except Exception as e:
             logger.error(f"AngelHeart: 清理前台后台任务失败: {e}", exc_info=True)

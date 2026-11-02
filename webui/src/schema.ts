@@ -7,4 +7,6 @@ export interface SchemaMeta {
   _special?: string
   default?: unknown
   editor_language?: string
+  /** 固定候选值：渲染为下拉框 */
+  options?: unknown[]
 }

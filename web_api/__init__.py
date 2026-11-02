@@ -11,6 +11,19 @@ from typing import Any, Dict, List, Optional
 
 from astrbot.api import logger
 
+try:  # 插件按包导入（astrbot_plugin_angel_heart.web_api）
+    from ..core.persona_digest import (
+        DIGEST_MAX_CHARS,
+        SOURCE_MANUAL,
+        collect_service_umos,
+    )
+except ImportError:  # 按顶层包导入（测试环境 import web_api）
+    from core.persona_digest import (  # type: ignore
+        DIGEST_MAX_CHARS,
+        SOURCE_MANUAL,
+        collect_service_umos,
+    )
+
 try:
     from astrbot.api.web import error_response, json_response, request
     HAS_WEB_API = True
@@ -325,6 +338,8 @@ def register_all_routes(
     config=None,
     plugin=None,
     prompt_settings=None,
+    persona_digest_store=None,
+    persona_resolver=None,
 ) -> None:
     """注册全部 WebUI API 路由。"""
     api = ProfileAPI(
@@ -365,6 +380,40 @@ def register_all_routes(
                 prompt_api.save_settings,
                 ["POST"],
                 "保存系统提示词设置",
+            )
+        )
+
+    if persona_digest_store is not None and persona_resolver is not None:
+        persona_api = AnalyzerPersonaAPI(
+            context,
+            persona_digest_store,
+            config_manager,
+            profile_store,
+            chat_sources,
+            persona_resolver,
+        )
+        routes.append(
+            (
+                "/astrbot_plugin_angel_heart/analyzer_personas",
+                persona_api.list_personas,
+                ["GET"],
+                "判定人格摘要列表（在用卡片 + 其他全部人格）",
+            )
+        )
+        routes.append(
+            (
+                "/astrbot_plugin_angel_heart/analyzer_personas/save",
+                persona_api.save_persona,
+                ["POST"],
+                "手工保存某张人格卡的判定摘要",
+            )
+        )
+        routes.append(
+            (
+                "/astrbot_plugin_angel_heart/analyzer_personas/reset",
+                persona_api.reset_persona,
+                ["POST"],
+                "清空某张人格卡的判定摘要（重载插件后重新生成）",
             )
         )
 
@@ -545,3 +594,175 @@ class PromptSettingsAPI:
             custom_prompt=payload.get("custom_prompt"),
         )
         return _ok(snapshot, "已保存")
+
+
+class AnalyzerPersonaAPI:
+    """判定人格摘要：列表、手工保存、清空。
+
+    - 列表 = 本插件服务会话解析到的「在用」人格卡 ∪ persona_manager 全量人格卡；
+      每张卡带 used_by，供设置页显示被哪些群使用。
+    - 保存写 source=manual、generated_at=当前时间，摘要上限 600 字符。
+    - 清空只删条目，不即时生成；重载插件（或保存配置触发的重载）后由后台任务补。
+    """
+
+    def __init__(
+        self,
+        context,
+        store,
+        config_manager,
+        profile_store,
+        chat_sources=None,
+        persona_resolver=None,
+    ):
+        self._context = context
+        self._store = store
+        self._config_manager = config_manager
+        self._profile_store = profile_store
+        self._chat_sources = chat_sources
+        self._resolver = persona_resolver
+
+    # ---------- 内部读取 ----------
+
+    def _analyzer_model(self) -> str:
+        try:
+            return str(self._config_manager.analyzer_model or "").strip()
+        except Exception:
+            return ""
+
+    def _mode(self) -> str:
+        try:
+            return str(self._config_manager.analyzer_persona_mode)
+        except Exception:
+            return "full"
+
+    def _display_name(self, umo: str) -> str:
+        if self._chat_sources is None:
+            return ""
+        try:
+            entry = self._chat_sources.get_source(umo)
+        except Exception:
+            return ""
+        if not isinstance(entry, dict):
+            return ""
+        return str(entry.get("display_name") or "")
+
+    async def _collect_used_by(self) -> Dict[str, List[Dict[str, str]]]:
+        """会话 -> 生效人格，反过来聚合成 {人格 name: [使用它的会话]}。"""
+        used_by: Dict[str, List[Dict[str, str]]] = {}
+        if self._resolver is None:
+            return used_by
+        try:
+            umos = collect_service_umos(
+                self._config_manager, self._profile_store, self._chat_sources
+            )
+        except Exception as e:
+            logger.debug(f"AngelHeart: 枚举服务会话失败: {e}")
+            return used_by
+        for umo in umos:
+            try:
+                name, _prompt = await self._resolver(umo)
+            except Exception as e:
+                logger.debug(f"AngelHeart: 解析会话人格失败（{umo}）: {e}")
+                continue
+            card_name = str(name or "").strip()
+            if not card_name:
+                continue
+            used_by.setdefault(card_name, []).append(
+                {"umo": umo, "display_name": self._display_name(umo)}
+            )
+        return used_by
+
+    async def _all_persona_names(self) -> List[str]:
+        """persona_manager 全量人格卡名字；不可用时返回空列表。"""
+        persona_manager = getattr(self._context, "persona_manager", None)
+        if persona_manager is None:
+            return []
+        try:
+            personas = await persona_manager.get_all_personas()
+        except Exception as e:
+            logger.debug(f"AngelHeart: 读取全量人格卡失败: {e}")
+            return []
+        names: List[str] = []
+        for persona in personas or []:
+            if isinstance(persona, dict):
+                name = str(persona.get("persona_id") or persona.get("name") or "").strip()
+            else:
+                name = str(getattr(persona, "persona_id", "") or "").strip()
+            if name and name not in names:
+                names.append(name)
+        return sorted(names)
+
+    @staticmethod
+    def _row(
+        name: str,
+        entries: Dict[str, Dict[str, Any]],
+        used_by: List[Dict[str, str]],
+    ) -> Dict[str, Any]:
+        entry = entries.get(name) or {}
+        return {
+            "name": name,
+            "digest": str(entry.get("digest") or ""),
+            "generated_at": str(entry.get("generated_at") or ""),
+            "model": str(entry.get("model") or ""),
+            "source": str(entry.get("source") or ""),
+            "used_by": used_by,
+        }
+
+    # ---------- 接口 ----------
+
+    async def list_personas(self):
+        """判定人格摘要列表：mode + 秘书模型 + 全部人格卡（在用/其他）。"""
+        try:
+            entries = self._store.entries()
+        except Exception as e:
+            return _err(f"读取判定人格摘要失败: {e}")
+
+        used_by = await self._collect_used_by()
+        rows: List[Dict[str, Any]] = []
+        seen = set()
+        for name in sorted(used_by):
+            rows.append(self._row(name, entries, used_by[name]))
+            seen.add(name)
+        for name in await self._all_persona_names():
+            if name in seen:
+                continue
+            seen.add(name)
+            rows.append(self._row(name, entries, []))
+
+        return _ok(
+            {
+                "mode": self._mode(),
+                "analyzer_model": self._analyzer_model(),
+                "personas": rows,
+            }
+        )
+
+    async def save_persona(self):
+        """手工保存某张人格卡的摘要（source=manual）。"""
+        payload = await _get_json()
+        if not isinstance(payload, dict):
+            return _err("请求体必须是 JSON 对象")
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return _err("缺少人格卡名称")
+        digest = str(payload.get("digest") or "").strip()
+        if len(digest) > DIGEST_MAX_CHARS:
+            return _err(f"摘要超过 {DIGEST_MAX_CHARS} 字符上限", 400)
+        entry = self._store.set(name, digest, SOURCE_MANUAL, self._analyzer_model())
+        if entry is None:
+            return _err("缺少人格卡名称")
+        return _ok(entry, "摘要已保存")
+
+    async def reset_persona(self):
+        """清空某张人格卡的摘要；重载插件后自动重新生成。"""
+        payload = await _get_json()
+        if not isinstance(payload, dict):
+            return _err("请求体必须是 JSON 对象")
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return _err("缺少人格卡名称")
+        removed = self._store.reset(name)
+        return _ok(
+            {"name": name, "removed": removed},
+            "已清空，重载插件后会重新生成",
+        )
